@@ -2,7 +2,7 @@ package database
 
 import (
 	"context"
-	"errors"
+	"log"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -16,21 +16,34 @@ func InitializeRedis() {
 	})
 }
 
-func Set(key string, value interface{}) error {
-	err := RedisDB.Set(ctx, key, value, 0).Err()
-	return err
+func Set(key string, value interface{}) {
+	if err := RedisDB.Set(ctx, key, value, 0).Err(); err != nil {
+		log.Fatal("Failed to set key:", err)
+	}
 }
 
-func Get(key string) (string, error) {
+func Get(key string) string {
 	val, err := RedisDB.Get(ctx, key).Result()
 	if err == redis.Nil {
-		return "", errors.New("key not found")
+		log.Fatal("Key not found:", key)
+	} else if err != nil {
+		log.Fatal("Failed to get key:", err)
 	}
 
-	return val, err
+	return val
 }
 
-func Delete(key string) error {
-	err := RedisDB.Del(ctx, key).Err()
-	return err
+func Delete(key string) {
+	if err := RedisDB.Del(ctx, key).Err(); err != nil {
+		log.Fatal("Failed to delete key:", err)
+	}
+}
+
+func Has(key string) bool {
+	count, err := RedisDB.Exists(ctx, key).Result()
+	if err != nil {
+		log.Fatal("Failed to check if key exists:", err)
+	}
+
+	return count > 0
 }
