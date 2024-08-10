@@ -13,7 +13,6 @@ type LoginInput struct {
 }
 
 type TokenClaims struct {
-	// I have changed StandardClaims with Claims
 	jwt.StandardClaims
 	CSRFSecret string `json:"csrfSecret"`
 }

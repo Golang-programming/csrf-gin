@@ -18,198 +18,131 @@ var (
 	signKey   *rsa.PrivateKey
 )
 
-func CheckAndRefreshTokens(accessTokenStr, refreshTokenStr, csrfSecret string) (newAccessTokenStr, newRefreshTokenStr, newCSRFSecret string, err error) {
-	//
-
-	accessToken, err := jwt.ParseWithClaims(accessTokenStr, &TokenClaims{}, func(_ *jwt.Token) (interface{}, error) {
-		return verifyKey, nil
-	})
-
-	accessTokenClaims, ok := accessToken.Claims.(*TokenClaims)
-	if !ok {
-		return
+func CheckAndRefreshTokens(accessTokenStr, refreshTokenStr, csrfSecret string) (string, string, string, error) {
+	accessTokenClaims, err := parseTokenClaims(accessTokenStr)
+	if err != nil {
+		return "", "", "", err
 	}
 
 	if csrfSecret != accessTokenClaims.CSRFSecret {
-		err = errors.New("Unauthorized")
-		return
+		return "", "", "", errors.New("unauthorized")
 	}
 
-	if accessToken.Valid {
-		newCSRFSecret = accessTokenClaims.CSRFSecret
-		newAccessTokenStr = accessTokenStr
-		newRefreshTokenStr, err = updateRefreshTokenExp(refreshTokenStr)
-
-		return
-	}
-
-	if accessTokenClaims.StandardClaims.ExpiresAt < time.Now().Unix() {
-		newAccessTokenStr, newCSRFSecret, err = updateAccessTokenStr(refreshTokenStr, accessTokenStr)
+	if time.Now().Unix() < accessTokenClaims.ExpiresAt {
+		newRefreshTokenStr, err := updateTokenExp(refreshTokenStr, accessTokenClaims.CSRFSecret)
 		if err != nil {
-			return
+			return "", "", "", err
 		}
-
-		newRefreshTokenStr, err = updateRefreshTokenExp(refreshTokenStr)
-		if err != nil {
-			return
-		}
-
-		newRefreshTokenStr, err = updateRefreshTokenCsrf(newAccessTokenStr, newCSRFSecret)
-		return
+		return accessTokenStr, newRefreshTokenStr, accessTokenClaims.CSRFSecret, nil
 	}
 
-	err = errors.New("Error in auth token")
-	return
-}
-
-func updateRefreshTokenCsrf(refreshTokenStr string, newCsrfString string) (newRefreshTokenStr string, err error) {
-	refreshToken, err := jwt.ParseWithClaims(refreshTokenStr, &TokenClaims{}, func(token *jwt.Token) (interface{}, error) {
-		return verifyKey, nil
-	})
-
-	oldRefreshTokenClaims, ok := refreshToken.Claims.(*TokenClaims)
-	if !ok {
-		return
+	newAccessTokenStr, newCSRFSecret, err := updateAccessToken(refreshTokenStr)
+	if err != nil {
+		return "", "", "", err
 	}
 
-	refreshClaims := TokenClaims{
-		jwt.StandardClaims{
-			Id:        oldRefreshTokenClaims.StandardClaims.Id,
-			Subject:   oldRefreshTokenClaims.StandardClaims.Subject,
-			ExpiresAt: oldRefreshTokenClaims.StandardClaims.ExpiresAt,
-		},
-		newCsrfString,
+	newRefreshTokenStr, err := updateTokenExp(refreshTokenStr, newCSRFSecret)
+	if err != nil {
+		return "", "", "", err
 	}
 
-	refreshJwt := jwt.NewWithClaims(jwt.GetSigningMethod("RS256"), refreshClaims)
-
-	newRefreshTokenStr, err = refreshJwt.SignedString(signKey)
-	return
+	return newAccessTokenStr, newRefreshTokenStr, newCSRFSecret, nil
 }
 
 func CreateTokensService(ctx *gin.Context, userId string) {
-	authTokenStr, refreshTokenStr, csrfSecret, err := createTokensHelper(userId)
-
+	accessTokenStr, refreshTokenStr, csrfSecret, err := createTokensHelper(userId)
 	if err != nil {
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
 	}
 
-	utils.SetCookies(ctx, authTokenStr, refreshTokenStr)
+	utils.SetCookies(ctx, accessTokenStr, refreshTokenStr)
 	ctx.Header("X-CSRF-Token", csrfSecret)
-
 	ctx.JSON(http.StatusOK, gin.H{"success": true})
 }
 
-func createTokensHelper(userId string) (accessToken, refreshToken, csrfSecret string, err error) {
-	csrfSecret = utils.GenerateCSRFSecret()
+func createTokensHelper(userId string) (string, string, string, error) {
+	csrfSecret := utils.GenerateCSRFSecret()
 
-	refreshToken, _ = createRefreshTokenStr(userId, csrfSecret)
-	accessToken, err = createAccessTokenStr(userId, csrfSecret)
-
+	refreshTokenStr, err := createToken(userId, csrfSecret, REFRESH_TOKEN_VALIDATE_TIME)
 	if err != nil {
-		err = errors.New("error: creating tokens")
+		return "", "", "", errors.New("error creating refresh token")
 	}
 
-	return
+	accessTokenStr, err := createToken(userId, csrfSecret, ACCESS_TOKEN_VALIDATE_TIME)
+	if err != nil {
+		return "", "", "", errors.New("error creating access token")
+	}
+
+	return accessTokenStr, refreshTokenStr, csrfSecret, nil
 }
 
-func createRefreshTokenStr(userId, csrfSecret string) (refreshTokenStr string, err error) {
-	refreshTokenExp := time.Now().Add(REFRESH_TOKEN_VALIDATE_TIME).Unix()
+func createToken(userId, csrfSecret string, duration time.Duration) (string, error) {
+	expirationTime := time.Now().Add(duration).Unix()
 	refreshJti := generateAndStoreRefreshTokenJti()
 
-	refreshClaims := TokenClaims{
-		jwt.StandardClaims{Id: refreshJti, Subject: userId, ExpiresAt: refreshTokenExp},
-		csrfSecret,
-	}
-
-	refreshJwt := jwt.NewWithClaims(jwt.GetSigningMethod("RS256"), refreshClaims)
-	refreshTokenStr, err = refreshJwt.SignedString(signKey)
-
-	return
-}
-
-func createAccessTokenStr(userId, csrfSecret string) (accessTokenStr string, err error) {
-	accessTokenExp := time.Now().Add(ACCESS_TOKEN_VALIDATE_TIME).Unix()
-
-	accessClaims := TokenClaims{
-		jwt.StandardClaims{ExpiresAt: accessTokenExp, Subject: userId},
-		csrfSecret,
-	}
-
-	accessToken := jwt.NewWithClaims(jwt.GetSigningMethod("RS256"), accessClaims)
-	accessTokenStr, err = accessToken.SignedString(signKey)
-
-	return
-}
-
-func updateRefreshTokenExp(refreshTokenStr string) (newRefreshTokenStr string, err error) {
-	refreshToken, err := jwt.ParseWithClaims(refreshTokenStr, &TokenClaims{}, func(token *jwt.Token) (interface{}, error) {
-		return verifyKey, nil
-	})
-
-	refreshTokenClaims, ok := refreshToken.Claims.(*TokenClaims)
-	if !ok {
-		return
-	}
-
-	refreshTokenExp := time.Now().Add(REFRESH_TOKEN_VALIDATE_TIME).Unix()
-
-	refreshClaims := TokenClaims{
-		jwt.StandardClaims{
-
-			Id:        refreshTokenClaims.StandardClaims.Id, // jti
-			Subject:   refreshTokenClaims.StandardClaims.Subject,
-			ExpiresAt: refreshTokenExp,
+	tokenClaims := TokenClaims{
+		StandardClaims: jwt.StandardClaims{
+			Id:        refreshJti,
+			Subject:   userId,
+			ExpiresAt: expirationTime,
 		},
-		refreshTokenClaims.CSRFSecret,
+		CSRFSecret: csrfSecret,
 	}
 
-	refreshJwt := jwt.NewWithClaims(jwt.GetSigningMethod("RS256"), refreshClaims)
-	newRefreshTokenStr, err = refreshJwt.SignedString(signKey)
-
-	return
+	return jwt.NewWithClaims(jwt.SigningMethodRS256, tokenClaims).SignedString(signKey)
 }
 
-func updateAccessTokenStr(refreshTokenStr, accessTokenStr string) (newAccessTokenStr, csrfSecret string, err error) {
-	refreshToken, err := jwt.ParseWithClaims(refreshTokenStr, &TokenClaims{}, func(token *jwt.Token) (interface{}, error) {
+func updateAccessToken(refreshTokenStr string) (string, string, error) {
+	refreshTokenClaims, err := parseTokenClaims(refreshTokenStr)
+	if err != nil {
+		return "", "", err
+	}
+
+	if err = refreshTokenClaims.Valid(); err != nil || !database.Has(refreshTokenClaims.Id) {
+		database.Delete(refreshTokenClaims.Id)
+		return "", "", errors.New("unauthorized")
+	}
+
+	csrfSecret := utils.GenerateCSRFSecret()
+	newAccessTokenStr, err := createToken(refreshTokenClaims.Subject, csrfSecret, ACCESS_TOKEN_VALIDATE_TIME)
+	return newAccessTokenStr, csrfSecret, err
+}
+
+func updateTokenExp(tokenStr, csrfSecret string) (string, error) {
+	tokenClaims, err := parseTokenClaims(tokenStr)
+	if err != nil {
+		return "", err
+	}
+
+	if tokenClaims == nil {
+		return "", errors.New("invalid token claims")
+	}
+
+	tokenClaims.ExpiresAt = time.Now().Add(REFRESH_TOKEN_VALIDATE_TIME).Unix()
+	tokenClaims.CSRFSecret = csrfSecret
+
+	return jwt.NewWithClaims(jwt.SigningMethodRS256, tokenClaims).SignedString(signKey)
+}
+
+func parseTokenClaims(tokenStr string) (*TokenClaims, error) {
+	token, err := jwt.ParseWithClaims(tokenStr, &TokenClaims{}, func(token *jwt.Token) (interface{}, error) {
 		return verifyKey, nil
 	})
+	if err != nil {
+		return nil, err
+	}
 
-	refreshTokenClaims, ok := refreshToken.Claims.(*TokenClaims)
+	claims, ok := token.Claims.(*TokenClaims)
 	if !ok {
-		return
+		return nil, errors.New("invalid token claims")
 	}
 
-	if database.Has(refreshTokenClaims.StandardClaims.Id) {
-		if refreshToken.Valid {
-			accessToken, _ := jwt.ParseWithClaims(accessTokenStr, &TokenClaims{}, func(token *jwt.Token) (interface{}, error) {
-				return verifyKey, nil
-			})
-
-			accessTokenClaims, ok := accessToken.Claims.(*TokenClaims)
-
-			if !ok {
-				err = errors.New("Unexpected token error")
-			}
-
-			csrfSecret = utils.GenerateCSRFSecret()
-			newAccessTokenStr, err = createAccessTokenStr(accessTokenClaims.StandardClaims.Subject, csrfSecret)
-
-			return
-		}
-
-		database.Delete(refreshTokenClaims.StandardClaims.Id)
-		err = errors.New("Unauthorized")
-		return
-	}
-
-	err = errors.New("Unauthorized")
-	return
+	return claims, nil
 }
 
 func generateAndStoreRefreshTokenJti() string {
 	jti := commonUtils.GenerateRandomString(64)
 	database.Set(jti, "valid")
-
 	return jti
 }
